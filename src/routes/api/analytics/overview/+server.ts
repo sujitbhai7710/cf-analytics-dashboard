@@ -49,8 +49,12 @@ export const GET: RequestHandler = async ({ url, locals, platform }) => {
       
       const workerAnalytics = [];
       for (const worker of workers.slice(0, 10)) {
+        // Get analytics for each worker
         const data = await getWorkerInvocations(account.account_id, apiToken, {
-          scriptName: worker.script, start, end, limit: 100
+          scriptName: worker.script,
+          start,
+          end,
+          limit: 100
         });
         
         // Aggregate worker data

@@ -5,14 +5,14 @@
  * API Tokens can be created at: https://dash.cloudflare.com/profile/api-tokens
  * Required permissions: 
  * - Account Analytics:Read
- * - Workers Scripts:Read
+ * - Account Workers Scripts:Read
  */
 
 const CF_GRAPHQL_ENDPOINT = 'https://api.cloudflare.com/client/v4/graphql';
 
 interface GraphQLResponse<T> {
   data?: T;
-  errors?: Array<{ message: string }>;
+  errors?: Array<{ message: string; extensions?: { code?: string } }>;
 }
 
 /**
@@ -331,42 +331,81 @@ export async function getCachePerformance(
 }
 
 /**
- * Test Cloudflare API connection
+ * Test Cloudflare API connection using GraphQL
+ * This tests with the actual permissions needed (Account Analytics:Read)
  */
 export async function testCloudflareConnection(
   accountId: string,
   apiToken: string
 ): Promise<{ success: boolean; accountName?: string; error?: string }> {
   try {
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${apiToken}`,
-          'Content-Type': 'application/json'
+    // Use a simple GraphQL query to test the connection
+    // This only requires Account Analytics:Read permission
+    const query = `
+      query ($accountId: String!) {
+        viewer {
+          accounts(filter: { accountTag: $accountId }) {
+            name
+            id
+          }
         }
       }
-    );
+    `;
+    
+    const response = await fetch(CF_GRAPHQL_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ query, variables: { accountId } })
+    });
     
     if (!response.ok) {
-      if (response.status === 403) {
+      const text = await response.text();
+      if (response.status === 403 || response.status === 401) {
         return { 
           success: false, 
-          error: 'API Token does not have permission to access this account. Make sure it has Account Analytics:Read permission.' 
+          error: 'Invalid API Token or token does not have required permissions. Make sure it has "Account Analytics:Read" permission.' 
         };
       }
-      return { success: false, error: `API error: ${response.status}` };
+      return { success: false, error: `API error: ${response.status} - ${text}` };
     }
     
-    const data = await response.json() as { result?: { name?: string } };
+    const result = await response.json() as GraphQLResponse<{
+      viewer: {
+        accounts: Array<{ name: string; id: string }>
+      }
+    }>;
+    
+    // Check for GraphQL errors
+    if (result.errors && result.errors.length > 0) {
+      const errorMsg = result.errors[0].message;
+      if (errorMsg.includes('authentication') || errorMsg.includes('authorize')) {
+        return {
+          success: false,
+          error: 'API Token authentication failed. Please check your token has "Account Analytics:Read" permission.'
+        };
+      }
+      return { success: false, error: `API Error: ${errorMsg}` };
+    }
+    
+    const accounts = result.data?.viewer?.accounts;
+    if (!accounts || accounts.length === 0) {
+      return { 
+        success: false, 
+        error: 'Account not found. Please verify your Account ID is correct.' 
+      };
+    }
+    
     return { 
       success: true, 
-      accountName: data.result?.name || accountId 
+      accountName: accounts[0].name || accountId 
     };
   } catch (error) {
     return { 
       success: false, 
-      error: error instanceof Error ? error.message : 'Unknown error' 
+      error: error instanceof Error ? error.message : 'Unknown error occurred' 
     };
   }
 }
