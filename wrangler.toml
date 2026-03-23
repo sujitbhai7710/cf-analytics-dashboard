@@ -1,0 +1,24 @@
+name = "cf-analytics-dashboard"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = ".svelte-kit/cloudflare"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "cf-analytics-db"
+database_id = "9ad0c87f-9ae6-4907-869e-cde985c00926"
+
+# KV Namespace binding
+[[kv_namespaces]]
+binding = "KV"
+id = "00e546bc6f4f4081ad1bb4f886003fa9"
+
+# Environment variables (secrets set via wrangler secret put)
+# ENCRYPTION_KEY - AES-256 key for encrypting sensitive data
+# JWT_SECRET - Secret for signing JWT tokens
+
+# Development settings
+[dev]
+port = 5173
+local_protocol = "http"
