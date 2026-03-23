@@ -2,7 +2,7 @@ import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { requireAuth } from '$lib/server/auth';
 import { decrypt } from '$lib/server/encryption';
-import { getWorkerInvocations, getWorkersList } from '$lib/server/cloudflare/analytics';
+import { getWorkerInvocations, getWorkersList, type CloudflareAuth } from '$lib/server/cloudflare/analytics';
 
 export const GET: RequestHandler = async ({ url, locals, platform }) => {
   const user = requireAuth({ locals } as any);
@@ -18,13 +18,13 @@ export const GET: RequestHandler = async ({ url, locals, platform }) => {
   }
   
   let query = platform!.env.DB.prepare(
-    `SELECT id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag 
+    `SELECT id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag, auth_type, cf_email 
      FROM cloudflare_accounts WHERE user_id = ? AND is_active = 1`
   ).bind(user.id);
   
   if (accountId) {
     query = platform!.env.DB.prepare(
-      `SELECT id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag 
+      `SELECT id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag, auth_type, cf_email 
        FROM cloudflare_accounts WHERE id = ? AND user_id = ? AND is_active = 1`
     ).bind(accountId, user.id);
   }
@@ -33,41 +33,62 @@ export const GET: RequestHandler = async ({ url, locals, platform }) => {
   const accounts = accountsResult.results as any[];
   
   const analyticsData = [];
-  const totals = { totalRequests: 0, totalErrors: 0, avgCpuTime: 0 };
-  let dataPoints = 0;
+  const totals = { totalRequests: 0, totalErrors: 0 };
   
   for (const account of accounts) {
     try {
-      const apiToken = await decrypt(
+      const decryptedKey = await decrypt(
         { ciphertext: account.api_token_encrypted, iv: account.api_token_iv, tag: account.api_token_tag },
         platform!.env.ENCRYPTION_KEY
       );
       
-      const workers = await getWorkersList(account.account_id, apiToken);
+      // Build auth object based on auth type
+      const auth: CloudflareAuth = {
+        type: account.auth_type || 'api_token',
+        apiToken: account.auth_type === 'api_token' || !account.auth_type ? decryptedKey : undefined,
+        email: account.auth_type === 'global_api_key' ? account.cf_email : undefined,
+        globalKey: account.auth_type === 'global_api_key' ? decryptedKey : undefined
+      };
+      
+      const workers = await getWorkersList(account.account_id, auth);
       
       const workerAnalytics = [];
       for (const worker of workers.slice(0, 10)) {
-        const data = await getWorkerInvocations(account.account_id, apiToken, {
+        const data = await getWorkerInvocations(account.account_id, auth, {
           scriptName: worker.script, start, end, limit: 100
         });
         
         for (const point of data) {
-          totals.totalRequests += point.sum.requests || 0;
-          totals.totalErrors += point.sum.errors || 0;
-          totals.avgCpuTime += point.avg.cpuTime || 0;
-          dataPoints++;
+          totals.totalRequests += point.sum?.requests || 0;
+          totals.totalErrors += point.sum?.errors || 0;
         }
         
-        workerAnalytics.push({ name: worker.script, data });
+        const totalWorkerRequests = data.reduce((sum, d) => sum + (d.sum?.requests || 0), 0);
+        const totalWorkerErrors = data.reduce((sum, d) => sum + (d.sum?.errors || 0), 0);
+        
+        workerAnalytics.push({ 
+          name: worker.script, 
+          requests: totalWorkerRequests,
+          errors: totalWorkerErrors,
+          data 
+        });
       }
       
-      analyticsData.push({ accountId: account.id, accountName: account.account_name, workers: workerAnalytics });
+      analyticsData.push({ 
+        accountId: account.id, 
+        cfAccountId: account.account_id,
+        accountName: account.account_name, 
+        workers: workerAnalytics 
+      });
     } catch (e) {
       console.error(`Failed to fetch analytics for ${account.account_name}:`, e);
+      analyticsData.push({ 
+        accountId: account.id, 
+        accountName: account.account_name, 
+        error: e instanceof Error ? e.message : 'Failed to fetch analytics' 
+      });
     }
   }
-  
-  if (dataPoints > 0) totals.avgCpuTime /= dataPoints;
   
   return json({ ...totals, accounts: analyticsData });
 };
