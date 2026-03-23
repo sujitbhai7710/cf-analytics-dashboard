@@ -2,27 +2,27 @@ import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { requireAuth } from '$lib/server/auth';
 import { encrypt } from '$lib/server/encryption';
-import { testCloudflareConnection, type CloudflareAuth } from '$lib/server/cloudflare/analytics';
+import { testCloudflareConnection } from '$lib/server/cloudflare/analytics';
 
 export const GET: RequestHandler = async ({ locals, platform }) => {
   const user = requireAuth({ locals } as any);
   
-  const accounts = await platform!.env.DB.prepare(
-    `SELECT id, account_name, account_id, is_active, last_sync, created_at 
+  const result = await platform!.env.DB.prepare(
+    `SELECT id, account_name, account_id, auth_type, is_active, last_sync, created_at 
      FROM cloudflare_accounts WHERE user_id = ? ORDER BY created_at DESC`
   ).bind(user.id).all();
   
-  // Format response
-  const safeAccounts = accounts.results?.map((acc: any) => ({
+  const accounts = result.results?.map((acc: any) => ({
     id: acc.id,
     accountName: acc.account_name,
     accountId: acc.account_id,
-    isActive: acc.is_active,
+    authType: acc.auth_type,
+    isActive: acc.is_active === 1,
     lastSync: acc.last_sync,
     createdAt: acc.created_at
   })) || [];
   
-  return json({ accounts: safeAccounts });
+  return json({ accounts });
 };
 
 export const POST: RequestHandler = async ({ request, locals, platform }) => {
@@ -36,16 +36,10 @@ export const POST: RequestHandler = async ({ request, locals, platform }) => {
     throw error(400, 'Account name, Account ID, and API Token are all required');
   }
   
-  // Build auth object for testing - API Token only
-  const auth: CloudflareAuth = {
-    type: 'api_token',
-    apiToken: apiToken
-  };
-  
   // Test connection before saving
-  const connectionTest = await testCloudflareConnection(accountId, auth);
+  const connectionTest = await testCloudflareConnection(accountId, apiToken);
   if (!connectionTest.success) {
-    throw error(400, `Failed to connect to Cloudflare: ${connectionTest.error}. Make sure your API Token has the required permissions.`);
+    throw error(400, `Failed to connect to Cloudflare: ${connectionTest.error}`);
   }
   
   // Encrypt API token
@@ -54,22 +48,28 @@ export const POST: RequestHandler = async ({ request, locals, platform }) => {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   
-  await platform!.env.DB.prepare(
-    `INSERT INTO cloudflare_accounts (id, user_id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag, auth_type, is_active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'api_token', 1, ?, ?)`
-  ).bind(id, user.id, accountName, accountId, encrypted.ciphertext, encrypted.iv, encrypted.tag, now, now).run();
-  
-  return json({ 
-    success: true, 
-    account: { 
-      id, 
-      accountName, 
-      accountId, 
-      authType: 'api_token',
-      isActive: true, 
-      createdAt: now 
-    } 
-  });
+  try {
+    await platform!.env.DB.prepare(
+      `INSERT INTO cloudflare_accounts 
+       (id, user_id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag, auth_type, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'api_token', 1, ?, ?)`
+    ).bind(id, user.id, accountName, accountId, encrypted.ciphertext, encrypted.iv, encrypted.tag, now, now).run();
+    
+    return json({ 
+      success: true, 
+      account: { 
+        id, 
+        accountName, 
+        accountId, 
+        authType: 'api_token',
+        isActive: true, 
+        createdAt: now 
+      } 
+    });
+  } catch (e) {
+    console.error('Failed to save account:', e);
+    throw error(500, 'Failed to save account to database');
+  }
 };
 
 export const DELETE: RequestHandler = async ({ request, locals, platform }) => {

@@ -1,5 +1,5 @@
 /**
- * Cloudflare GraphQL Analytics API Client
+ * Cloudflare API Client
  * 
  * Uses API Token authentication (secure, scoped permissions)
  * API Tokens can be created at: https://dash.cloudflare.com/profile/api-tokens
@@ -331,81 +331,72 @@ export async function getCachePerformance(
 }
 
 /**
- * Test Cloudflare API connection using GraphQL
- * This tests with the actual permissions needed (Account Analytics:Read)
+ * Test Cloudflare API connection using REST API
+ * Tests token validity and workers access
  */
 export async function testCloudflareConnection(
   accountId: string,
   apiToken: string
 ): Promise<{ success: boolean; accountName?: string; error?: string }> {
   try {
-    // Use a simple GraphQL query to test the connection
-    // This only requires Account Analytics:Read permission
-    const query = `
-      query ($accountId: String!) {
-        viewer {
-          accounts(filter: { accountTag: $accountId }) {
-            name
-            id
-          }
+    // First verify the token is valid
+    const verifyResponse = await fetch(
+      'https://api.cloudflare.com/client/v4/user/tokens/verify',
+      {
+        headers: {
+          'Authorization': `Bearer ${apiToken}`,
+          'Content-Type': 'application/json'
         }
       }
-    `;
+    );
     
-    const response = await fetch(CF_GRAPHQL_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ query, variables: { accountId } })
-    });
-    
-    if (!response.ok) {
-      const text = await response.text();
-      if (response.status === 403 || response.status === 401) {
-        return { 
-          success: false, 
-          error: 'Invalid API Token or token does not have required permissions. Make sure it has "Account Analytics:Read" permission.' 
-        };
-      }
-      return { success: false, error: `API error: ${response.status} - ${text}` };
-    }
-    
-    const result = await response.json() as GraphQLResponse<{
-      viewer: {
-        accounts: Array<{ name: string; id: string }>
-      }
-    }>;
-    
-    // Check for GraphQL errors
-    if (result.errors && result.errors.length > 0) {
-      const errorMsg = result.errors[0].message;
-      if (errorMsg.includes('authentication') || errorMsg.includes('authorize')) {
-        return {
-          success: false,
-          error: 'API Token authentication failed. Please check your token has "Account Analytics:Read" permission.'
-        };
-      }
-      return { success: false, error: `API Error: ${errorMsg}` };
-    }
-    
-    const accounts = result.data?.viewer?.accounts;
-    if (!accounts || accounts.length === 0) {
-      return { 
-        success: false, 
-        error: 'Account not found. Please verify your Account ID is correct.' 
+    if (!verifyResponse.ok) {
+      const errorData = await verifyResponse.json() as { errors?: Array<{ message: string }> };
+      const errorMsg = errorData.errors?.[0]?.message || `Token verification failed: ${verifyResponse.status}`;
+      return {
+        success: false,
+        error: `Invalid API Token: ${errorMsg}`
       };
     }
     
-    return { 
-      success: true, 
-      accountName: accounts[0].name || accountId 
+    // Test access to the workers scripts endpoint for this account
+    const workersResponse = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts`,
+      {
+        headers: {
+          'Authorization': `Bearer ${apiToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    if (!workersResponse.ok) {
+      const errorData = await workersResponse.json() as { errors?: Array<{ message: string }> };
+      const errorMsg = errorData.errors?.[0]?.message || `Access denied: ${workersResponse.status}`;
+      
+      if (workersResponse.status === 403 || workersResponse.status === 401) {
+        return {
+          success: false,
+          error: 'API Token does not have Workers Scripts:Read permission for this account.'
+        };
+      }
+      return {
+        success: false,
+        error: errorMsg
+      };
+    }
+    
+    const workersData = await workersResponse.json() as { result?: any[] };
+    const workerCount = workersData.result?.length || 0;
+    
+    return {
+      success: true,
+      accountName: `Account with ${workerCount} worker${workerCount !== 1 ? 's' : ''}`
     };
   } catch (error) {
-    return { 
-      success: false, 
-      error: error instanceof Error ? error.message : 'Unknown error occurred' 
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
     };
   }
 }
@@ -431,6 +422,12 @@ export async function getWorkersList(
     throw new Error(`Failed to fetch workers: ${response.status}`);
   }
   
-  const data = await response.json() as { result: Array<{ id: string; script: string; created_on: string; modified_on: string }> };
-  return data.result || [];
+  const data = await response.json() as { result: Array<{ id: string; script?: string; created_on: string; modified_on: string }> };
+  // The 'id' field is actually the script name in Cloudflare's API
+  return data.result?.map(w => ({
+    id: w.id,
+    script: w.script || w.id,
+    created_on: w.created_on,
+    modified_on: w.modified_on
+  })) || [];
 }
