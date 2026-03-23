@@ -2,7 +2,7 @@ import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { requireAuth } from '$lib/server/auth';
 import { decrypt } from '$lib/server/encryption';
-import { getWorkerInvocations, getWorkersList, type CloudflareAuth } from '$lib/server/cloudflare/analytics';
+import { getWorkerInvocations, getWorkersList } from '$lib/server/cloudflare/analytics';
 
 export const GET: RequestHandler = async ({ url, locals, platform }) => {
   const user = requireAuth({ locals } as any);
@@ -17,14 +17,15 @@ export const GET: RequestHandler = async ({ url, locals, platform }) => {
     default: start.setHours(start.getHours() - 24);
   }
   
+  // Get accounts from database
   let query = platform!.env.DB.prepare(
-    `SELECT id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag, auth_type, cf_email 
+    `SELECT id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag 
      FROM cloudflare_accounts WHERE user_id = ? AND is_active = 1`
   ).bind(user.id);
   
   if (accountId) {
     query = platform!.env.DB.prepare(
-      `SELECT id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag, auth_type, cf_email 
+      `SELECT id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag 
        FROM cloudflare_accounts WHERE id = ? AND user_id = ? AND is_active = 1`
     ).bind(accountId, user.id);
   }
@@ -37,27 +38,22 @@ export const GET: RequestHandler = async ({ url, locals, platform }) => {
   
   for (const account of accounts) {
     try {
-      const decryptedKey = await decrypt(
+      // Decrypt API token
+      const apiToken = await decrypt(
         { ciphertext: account.api_token_encrypted, iv: account.api_token_iv, tag: account.api_token_tag },
         platform!.env.ENCRYPTION_KEY
       );
       
-      // Build auth object based on auth type
-      const auth: CloudflareAuth = {
-        type: account.auth_type || 'api_token',
-        apiToken: account.auth_type === 'api_token' || !account.auth_type ? decryptedKey : undefined,
-        email: account.auth_type === 'global_api_key' ? account.cf_email : undefined,
-        globalKey: account.auth_type === 'global_api_key' ? decryptedKey : undefined
-      };
-      
-      const workers = await getWorkersList(account.account_id, auth);
+      // Get workers list
+      const workers = await getWorkersList(account.account_id, apiToken);
       
       const workerAnalytics = [];
       for (const worker of workers.slice(0, 10)) {
-        const data = await getWorkerInvocations(account.account_id, auth, {
+        const data = await getWorkerInvocations(account.account_id, apiToken, {
           scriptName: worker.script, start, end, limit: 100
         });
         
+        // Aggregate worker data
         for (const point of data) {
           totals.totalRequests += point.sum?.requests || 0;
           totals.totalErrors += point.sum?.errors || 0;

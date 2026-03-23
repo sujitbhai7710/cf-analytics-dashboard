@@ -97,17 +97,14 @@ export async function encrypt(
 
 /**
  * Decrypt ciphertext using AES-256-GCM
- * Supports key rotation by trying multiple keys
  * 
  * @param encrypted - The encrypted data object
- * @param keyString - Current encryption key (base64)
- * @param previousKeyString - Optional previous key for rotation support
+ * @param keyString - Encryption key (base64)
  * @returns Decrypted plaintext
  */
 export async function decrypt(
   encrypted: EncryptedData,
-  keyString: string,
-  previousKeyString?: string
+  keyString: string
 ): Promise<string> {
   // Decode base64 values
   const iv = base64ToArrayBuffer(encrypted.iv);
@@ -119,32 +116,13 @@ export async function decrypt(
   combined.set(new Uint8Array(ciphertext), 0);
   combined.set(new Uint8Array(tag), ciphertext.byteLength);
   
-  // Try current key first
-  try {
-    const key = await importKey(keyString);
-    const decrypted = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: iv, tagLength: 128 },
-      key,
-      combined
-    );
-    return new TextDecoder().decode(decrypted);
-  } catch (e) {
-    // If we have a previous key, try it (for key rotation)
-    if (previousKeyString) {
-      try {
-        const previousKey = await importKey(previousKeyString);
-        const decrypted = await crypto.subtle.decrypt(
-          { name: 'AES-GCM', iv: iv, tagLength: 128 },
-          previousKey,
-          combined
-        );
-        return new TextDecoder().decode(decrypted);
-      } catch (e2) {
-        throw new Error('Decryption failed with all keys');
-      }
-    }
-    throw new Error('Decryption failed');
-  }
+  const key = await importKey(keyString);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: iv, tagLength: 128 },
+    key,
+    combined
+  );
+  return new TextDecoder().decode(decrypted);
 }
 
 /**

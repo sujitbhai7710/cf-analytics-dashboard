@@ -8,17 +8,15 @@ export const GET: RequestHandler = async ({ locals, platform }) => {
   const user = requireAuth({ locals } as any);
   
   const accounts = await platform!.env.DB.prepare(
-    `SELECT id, account_name, account_id, auth_type, cf_email, is_active, last_sync, created_at 
+    `SELECT id, account_name, account_id, is_active, last_sync, created_at 
      FROM cloudflare_accounts WHERE user_id = ? ORDER BY created_at DESC`
   ).bind(user.id).all();
   
-  // Remove sensitive data from response
+  // Format response
   const safeAccounts = accounts.results?.map((acc: any) => ({
     id: acc.id,
     accountName: acc.account_name,
     accountId: acc.account_id,
-    authType: acc.auth_type,
-    cfEmail: acc.cf_email,
     isActive: acc.is_active,
     lastSync: acc.last_sync,
     createdAt: acc.created_at
@@ -31,52 +29,35 @@ export const POST: RequestHandler = async ({ request, locals, platform }) => {
   const user = requireAuth({ locals } as any);
   const body = await request.json();
   
-  const { accountName, accountId, apiToken, email, authType = 'api_token' } = body;
+  const { accountName, accountId, apiToken } = body;
   
-  if (!accountName || !accountId) {
-    throw error(400, 'Account name and Account ID are required');
+  // Validate required fields
+  if (!accountName || !accountId || !apiToken) {
+    throw error(400, 'Account name, Account ID, and API Token are all required');
   }
   
-  // Validate based on auth type
-  if (authType === 'api_token') {
-    if (!apiToken) {
-      throw error(400, 'API Token is required for api_token auth type');
-    }
-  } else if (authType === 'global_api_key') {
-    if (!email || !apiToken) {
-      throw error(400, 'Email and API Key are required for global_api_key auth type');
-    }
-  } else {
-    throw error(400, 'Invalid auth type. Use "api_token" or "global_api_key"');
-  }
-  
-  // Build auth object for testing
+  // Build auth object for testing - API Token only
   const auth: CloudflareAuth = {
-    type: authType,
-    apiToken: authType === 'api_token' ? apiToken : undefined,
-    email: authType === 'global_api_key' ? email : undefined,
-    globalKey: authType === 'global_api_key' ? apiToken : undefined
+    type: 'api_token',
+    apiToken: apiToken
   };
   
   // Test connection before saving
   const connectionTest = await testCloudflareConnection(accountId, auth);
   if (!connectionTest.success) {
-    throw error(400, `Failed to connect to Cloudflare: ${connectionTest.error}`);
+    throw error(400, `Failed to connect to Cloudflare: ${connectionTest.error}. Make sure your API Token has the required permissions.`);
   }
   
-  // Encrypt API token/key
+  // Encrypt API token
   const encrypted = await encrypt(apiToken, platform!.env.ENCRYPTION_KEY);
   
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   
-  // Store email for global_api_key type
-  const cfEmail = authType === 'global_api_key' ? email : null;
-  
   await platform!.env.DB.prepare(
-    `INSERT INTO cloudflare_accounts (id, user_id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag, auth_type, cf_email, is_active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
-  ).bind(id, user.id, accountName, accountId, encrypted.ciphertext, encrypted.iv, encrypted.tag, authType, cfEmail, now, now).run();
+    `INSERT INTO cloudflare_accounts (id, user_id, account_name, account_id, api_token_encrypted, api_token_iv, api_token_tag, auth_type, is_active, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'api_token', 1, ?, ?)`
+  ).bind(id, user.id, accountName, accountId, encrypted.ciphertext, encrypted.iv, encrypted.tag, now, now).run();
   
   return json({ 
     success: true, 
@@ -84,8 +65,7 @@ export const POST: RequestHandler = async ({ request, locals, platform }) => {
       id, 
       accountName, 
       accountId, 
-      authType, 
-      cfEmail,
+      authType: 'api_token',
       isActive: true, 
       createdAt: now 
     } 
